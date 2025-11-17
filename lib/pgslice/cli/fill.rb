@@ -62,15 +62,16 @@ module PgSlice
       # Get the appropriate handler for the ID type
       # Prefer --start option, then max_source_id, then sample from table
       handler = if options[:start]
-        id_handler(options[:start])
+        id_handler(options[:start], connection, source_table, primary_key)
       elsif max_source_id
-        id_handler(max_source_id)
+        id_handler(max_source_id, connection, source_table, primary_key)
       else
         # Sample a row to determine ID type
         sample_query = "SELECT #{quote_ident(primary_key)} FROM #{quote_table(source_table)} LIMIT 1"
+        log_sql sample_query
         sample_result = execute(sample_query)[0]
         if sample_result && sample_result[primary_key]
-          id_handler(sample_result[primary_key])
+          id_handler(sample_result[primary_key], connection, source_table, primary_key)
         else
           # Default to numeric if we can't determine
           Helpers::NumericHandler.new
@@ -108,16 +109,27 @@ module PgSlice
         batch_label = batch_count ? "#{i} of #{batch_count}" : "batch #{i}"
         
         if handler.is_a?(UlidHandler)
-          # For ULIDs, add ORDER BY and LIMIT to the query
+          # For ULIDs, use CTE with RETURNING to get max ID inserted
           query = <<~SQL
             /* #{batch_label} */
-            INSERT INTO #{quote_table(dest_table)} (#{fields})
-                SELECT #{fields} FROM #{quote_table(source_table)}
-                WHERE #{where}
-                ORDER BY #{quote_ident(primary_key)}
-                LIMIT #{batch_size}
-                ON CONFLICT DO NOTHING
+            WITH inserted_batch AS (
+              INSERT INTO #{quote_table(dest_table)} (#{fields})
+                  SELECT #{fields} FROM #{quote_table(source_table)}
+                  WHERE #{where}
+                  ORDER BY #{quote_ident(primary_key)}
+                  LIMIT #{batch_size}
+                  ON CONFLICT DO NOTHING
+                  RETURNING #{quote_ident(primary_key)}
+            )
+            SELECT MAX(#{quote_ident(primary_key)}) as max_inserted_id FROM inserted_batch
           SQL
+          
+          log_sql query
+          result = execute(query)
+          max_inserted_id = result[0]["max_inserted_id"]
+          puts "starting_id: #{starting_id}"
+          puts "max_inserted_id: #{max_inserted_id}"
+          starting_id = max_inserted_id
         else
           query = <<~SQL
             /* #{batch_label} */
@@ -126,20 +138,8 @@ module PgSlice
                 WHERE #{where}
                 ON CONFLICT DO NOTHING
           SQL
-        end
-
-        run_query(query)
-
-        # Update starting_id for next batch
-        if handler.is_a?(UlidHandler)
-          # For ULIDs, get the max ID from the batch we just processed
-          last_id_query = <<~SQL
-            SELECT MAX(#{quote_ident(primary_key)}) FROM #{quote_table(dest_table)}
-            WHERE #{quote_ident(primary_key)} > #{quote(starting_id)}
-          SQL
-          result = execute(last_id_query)[0]["max"]
-          starting_id = result || starting_id
-        else
+          
+          run_query(query)
           starting_id = handler.next_starting_id(starting_id, batch_size)
         end
         

@@ -200,9 +200,9 @@ module PgSlice
     end
 
     # Factory method to get the appropriate ID handler
-    def id_handler(sample_id)
+    def id_handler(sample_id, connection = nil, table = nil, primary_key = nil)
       if ulid?(sample_id)
-        UlidHandler.new
+        UlidHandler.new(connection, table, primary_key)
       else
         NumericHandler.new
       end
@@ -237,12 +237,30 @@ module PgSlice
     end
 
     class UlidHandler
+      def initialize(connection = nil, table = nil, primary_key = nil)
+        @connection = connection
+        @table = table
+        @primary_key = primary_key
+      end
+
       def min_value
         PgSlice::Helpers::DEFAULT_ULID
       end
 
       def predecessor(id)
-        PgSlice::Helpers::DEFAULT_ULID
+        # Use database lookup to find the actual predecessor
+        return PgSlice::Helpers::DEFAULT_ULID unless @connection && @table && @primary_key
+        
+        query = <<~SQL
+          SELECT MAX(#{PG::Connection.quote_ident(@primary_key)}) 
+          FROM #{@table.quote_table} 
+          WHERE #{PG::Connection.quote_ident(@primary_key)} < '#{id}'
+        SQL
+        
+        log_sql query
+        result = @connection.exec(query)
+        predecessor_id = result[0]["max"]
+        predecessor_id || PgSlice::Helpers::DEFAULT_ULID
       end
 
       def should_continue?(current_id, max_id)

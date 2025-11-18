@@ -129,6 +129,12 @@ module PgSlice
           max_inserted_id = result[0]["max_inserted_id"]
           puts "starting_id: #{starting_id}"
           puts "max_inserted_id: #{max_inserted_id}"
+          
+          # If no records were inserted, break the loop
+          if max_inserted_id.nil?
+            break
+          end
+          
           starting_id = max_inserted_id
         else
           query = <<~SQL
